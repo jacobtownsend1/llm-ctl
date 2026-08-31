@@ -157,6 +157,62 @@ llm-ctl logs -f         # follow it
 eval "$(llm-ctl env)"   # point an OpenAI client at it
 ```
 
+## Models that are not one container
+
+Some deployments cannot be a single `run`: a compose stack, a vendor recipe, or
+a model tensor-parallel across two machines that has to start the worker before
+the head. `BACKEND=external` hands those off. llm-ctl stops trying to build a
+command line and instead calls your launcher, then watches the container you
+name on the port you name:
+
+```bash
+DESC="284B MoE, TP=2 across two boxes"
+BACKEND="external"
+IMAGE="ghcr.io/example/two-node-vllm:1.0"
+
+NODES=2                     # shown by status; documentation, not orchestration
+MODEL_PORT=8888
+CONTAINER_NAME="big-moe-head"          # the name YOUR launcher gives it
+LAUNCHER="$LLM_HOME/recipes/big-moe/start.sh"
+STOPPER="$LLM_HOME/recipes/big-moe/stop.sh"
+LOGGER="$LLM_HOME/recipes/big-moe/logs.sh"   # optional
+```
+
+`ARGS` is ignored for these — the launcher builds its own command line. Put the
+serving knobs wherever that launcher reads them and say so in a comment, or the
+next person will change `ARGS` and wonder why nothing happens.
+
+### What llm-ctl expects of a launcher
+
+Three things, and they are the whole contract:
+
+1. **`LAUNCHER` exits 0 once it has handed off.** It does not need to wait for
+   the model to be ready — llm-ctl polls `MODEL_PORT` until it answers. A
+   non-zero exit is reported with the last 20 lines of its log.
+2. **A container named `CONTAINER_NAME` is running afterwards.** That is how
+   `ls`, `status` and `logs` find the deployment. It is matched as an exact
+   string, so any name is fine.
+3. **`STOPPER` tears down every node**, not just the one on this machine. This
+   is the one that bites: `docker stop` on the head leaves the worker holding
+   the other machine's GPU. If a model has no `STOPPER`, llm-ctl says so rather
+   than pretending the stop was clean.
+
+Output goes to `$LLM_HOME/<model>-launch.log`, which `start` names as it runs.
+
+### What this does and does not give you
+
+llm-ctl does not do distributed serving. It does not copy weights between
+machines, start remote containers, coordinate ranks, or know what a rank is.
+The engine and the recipe do all of that. What llm-ctl adds is that a two-node
+deployment gets a name, a definition, and the same four verbs as everything
+else — it appears in the same `ls` as an 8B on a laptop GPU, `start` waits for
+it to actually answer, `stop` tears down all of it, and starting it stops
+whatever single-node model was using the GPU first.
+
+That is a real convenience and a deliberately small claim. If you need llm-ctl
+to *orchestrate* multiple machines, it is the wrong tool; write the recipe, and
+point `LAUNCHER` at it.
+
 ## Things that commonly go wrong
 
 **A file the flags refer to does not exist inside the container.** llm-ctl

@@ -50,6 +50,11 @@ in — prefer it over guessing from memory.
 - **Never widen `BIND` on your own.** `0.0.0.0` exposes an unauthenticated
   endpoint to the network. If the user needs it, set `API_KEY` too.
 - **Pin `IMAGE` to a version** rather than `latest` in anything you write.
+- **`BACKEND=external` ignores `ARGS`.** Those models are started by their own
+  `LAUNCHER`, which builds its own command line; serving knobs live wherever
+  that launcher reads them. Adding flags to `ARGS` there changes nothing, and
+  looks like it should. `STOPPER` must tear down every node, not just the local
+  container. See docs/adding-a-model.md, "Models that are not one container".
 
 ## Writing the comments
 

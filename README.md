@@ -158,9 +158,15 @@ you can change how `vllm` is launched without forking anything. See
 [docs/backends.md](docs/backends.md).
 
 `external` is the escape hatch for anything that is not one container: it calls
-your `LAUNCHER`, then watches the container you name on the port you name.
-That is how a two-node tensor-parallel deployment fits in the same `ls` output
-as an 8B on a laptop GPU.
+your `LAUNCHER`, then watches the container you name on the port you name, and
+`STOPPER` tears the whole thing down. That is how a two-node tensor-parallel
+deployment fits in the same `ls` output as an 8B on a laptop GPU.
+
+To be clear about the boundary: llm-ctl does not do distributed serving. It
+does not move weights, start remote containers, or coordinate ranks — your
+recipe does that. What it adds is that the deployment gets a name, a
+definition, and the same verbs as everything else. See
+[docs/adding-a-model.md](docs/adding-a-model.md#models-that-are-not-one-container).
 
 ## Configuration
 
