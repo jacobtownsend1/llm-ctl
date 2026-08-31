@@ -1,0 +1,14 @@
+# llm-ctl is a set of sourced modules plus a plugin directory, and shellcheck
+# analyses one file at a time. Three of its checks therefore fire constantly on
+# code that is correct by design; the rest are all enabled.
+#
+# SC2034  "appears unused" — lib/config.sh assigns the model schema, and
+#         lib/commands.sh and backends/*.sh read it. Neither file sees the
+#         other's use of the variable.
+# SC2329  "function never invoked" — the backend contract's default
+#         implementations exist precisely to be overridden and called
+#         indirectly, after a backend file is sourced over them.
+# SC2153  "possible misspelling" — PORT/port and ARGS/args are genuinely
+#         different things here: uppercase is configuration, lowercase is local.
+disable=SC2034,SC2329,SC2153
+external-sources=true

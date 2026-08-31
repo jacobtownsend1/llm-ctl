@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck -x -s bash bin/llm-ctl lib/*.sh backends/*.sh tests/run.sh tests/stubs/*
+
+      # The suite stubs the container runtime and HTTP, so it needs no docker,
+      # no GPU, no network and no model weights.
+      - name: test
+        run: ./tests/run.sh
+
+      - name: install cleanly into a temp prefix
+        run: |
+          ./install.sh --prefix "$RUNNER_TEMP/prefix" --copy
+          "$RUNNER_TEMP/prefix/bin/llm-ctl" --version
+          "$RUNNER_TEMP/prefix/bin/llm-ctl" backends
+          ./install.sh --prefix "$RUNNER_TEMP/prefix" --uninstall
+          test ! -e "$RUNNER_TEMP/prefix/bin/llm-ctl"
+
+  shells:
+    # The floor is bash 4.4; check the oldest and the newest we claim.
+    runs-on: ubuntu-latest
+    container: bash:${{ matrix.bash }}
+    strategy:
+      matrix:
+        bash: ["4.4", "5.2"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: apk add --no-cache coreutils grep gawk sed curl python3 || true
+      - run: bash ./tests/run.sh

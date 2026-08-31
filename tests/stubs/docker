@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Fake container runtime for the test suite. State lives in $STUB_STATE:
+#   images    one image reference per line
+#   running   "<container>\t<model>\t<image>" per line
+#   all       same, for containers that have ever existed
+#   calls     every invocation, one argv per line
+set -uo pipefail
+S=${STUB_STATE:?STUB_STATE not set}
+mkdir -p "$S"; : >>"$S/images"; : >>"$S/running"; : >>"$S/all"; : >>"$S/calls"
+printf '%s\n' "$*" >>"$S/calls"
+
+# Which container did the last `run` create? Used by inspect.
+_field() { awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f}' "$S/running" "$S/all" | head -1; }
+
+case "${1:-}" in
+  info)    grep -q . "$S/images" && echo " Runtimes: nvidia runc"; exit 0 ;;
+  version) echo "99.0-stub"; exit 0 ;;
+  pull)    echo "$2" >>"$S/images"; exit 0 ;;
+esac
+
+case "${1:-}" in
+  ps)
+    shift
+    want_all=0; label_filter=0; fmt='{{.Names}}'
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -a|--all) want_all=1; shift ;;
+        --filter) [[ "$2" == label=llm-ctl.model* ]] && label_filter=1; shift 2 ;;
+        --format) fmt=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    src="$S/running"; [ "$want_all" = 1 ] && src="$S/all"
+    # Real `docker ps` exposes .Labels as ONE comma-joined string, so
+    # `{{index .Labels "k"}}` is a template error, not a lookup. Reproduce that
+    # exactly: a stub that quietly answered it would hide the bug.
+    case "$fmt" in
+      *'index .Labels'*)
+        echo 'failed to execute template: error calling index: cannot index slice/array with type string' >&2
+        exit 1 ;;
+    esac
+    # awk, not read: `read` with IFS=tab collapses runs of tabs, which would
+    # lose the empty model field that marks a container llm-ctl did not create.
+    awk -F'\t' -v lf="$label_filter" -v fmt="$fmt" '
+      $1 == "" { next }
+      lf == 1 && $2 == "" { next }
+      {
+        if (fmt ~ /Labels/) { printf "llm-ctl.model=%s,org.opencontainers.image.ref.name=ubuntu\n", $2 }
+        else                { print $1 }
+      }' "$src"
+    exit 0 ;;
+
+  image)
+    [ "${2:-}" = inspect ] || exit 1
+    grep -qxF -e "${3:-}" "$S/images" && exit 0 || exit 1 ;;
+
+  container)
+    [ "${2:-}" = inspect ] || exit 1
+    cut -f1 "$S/all" | grep -qxF -e "${3:-}" && exit 0 || exit 1 ;;
+
+  inspect)
+    shift; fmt=""
+    [ "${1:-}" = -f ] && { fmt=$2; shift 2; }
+    name=${1:-}
+    cut -f1 "$S/all" | grep -qxF -e "$name" || exit 1
+    state=stopped
+    cut -f1 "$S/running" | grep -qxF -e "$name" && state=running
+    out=$fmt
+    out=${out//\{\{index .Config.Labels \"llm-ctl.model\"\}\}/$(_field "$name" 2)}
+    out=${out//\{\{.State.Status\}\}/$state}
+    out=${out//\{\{.State.StartedAt\}\}/2026-01-01T00:00:00Z}
+    out=${out//\{\{.Config.Image\}\}/$(_field "$name" 3)}
+    out=${out//\{\{.State.ExitCode\}\}/0}
+    echo "$out"; exit 0 ;;
+
+  run)
+    shift
+    name=""; image=""; model=""
+    args=("$@")
+    for (( i=0; i<${#args[@]}; i++ )); do
+      case "${args[i]}" in
+        --name)  name=${args[i+1]} ;;
+        --label) [[ "${args[i+1]}" == llm-ctl.model=* ]] && model=${args[i+1]#llm-ctl.model=} ;;
+      esac
+    done
+    # the image is the first argument that is a known image
+    for a in "${args[@]}"; do
+      if grep -qxF -e "$a" "$S/images"; then image=$a; break; fi
+    done
+    [ -n "$image" ] || { echo "stub: no such image" >&2; exit 125; }
+    printf '%s\n' "$*" >"$S/last-run"
+    if [ "${STUB_RUN_FAILS:-0}" = 1 ]; then echo "stub: run failed" >&2; exit 125; fi
+    # STUB_RUN_DEAD: the container is created and then exits, the way a bad
+    # flag or an OOM looks to llm-ctl.
+    [ "${STUB_RUN_DEAD:-0}" = 1 ] || \
+      printf '%s\t%s\t%s\n' "$name" "$model" "$image" >>"$S/running"
+    printf '%s\t%s\t%s\n' "$name" "$model" "$image" >>"$S/all"
+    echo "stubcontainerid"; exit 0 ;;
+
+  stop)
+    grep -v "^${2}	" "$S/running" >"$S/running.tmp" 2>/dev/null || :
+    mv "$S/running.tmp" "$S/running"; echo "$2"; exit 0 ;;
+
+  rm)
+    shift; [ "${1:-}" = -f ] && shift
+    grep -v "^${1}	" "$S/running" >"$S/running.tmp" 2>/dev/null || :
+    mv "$S/running.tmp" "$S/running"
+    grep -v "^${1}	" "$S/all" >"$S/all.tmp" 2>/dev/null || :
+    mv "$S/all.tmp" "$S/all"; exit 0 ;;
+
+  logs)
+    echo "stub log line 1"; echo "stub log line 2"; exit 0 ;;
+esac
+exit 0

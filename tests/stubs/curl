@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fake curl. STUB_SERVING lists ports that answer; anything else 404s the way
+# real curl -f does (exit 22, no output).
+set -uo pipefail
+url=""
+for a in "$@"; do case "$a" in http://*) url=$a ;; esac; done
+port=${url#*://*:}; port=${port%%/*}
+for p in ${STUB_SERVING:-}; do
+  [ "$p" = "$port" ] && { echo '{"data":[]}'; exit 0; }
+done
+exit 22

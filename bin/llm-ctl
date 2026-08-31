@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# llm-ctl — run one local model server at a time, from files you can read.
+#
+# https://github.com/jacobtownsend1/llm-ctl
+
+set -uo pipefail
+
+LLMCTL_VERSION="1.0.0"
+
+# Bash 4.4+: this leans on arrays, associative expansion, and empty-array
+# expansion under `set -u`. macOS ships 3.2; `brew install bash` fixes it.
+if [ -z "${BASH_VERSINFO:-}" ] ||
+   [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
+   { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  echo "llm-ctl needs bash 4.4 or newer (this is ${BASH_VERSION:-unknown})" >&2
+  exit 1
+fi
+
+# Where the installed tree lives, following symlinks so ~/.local/bin/llm-ctl ->
+# /path/to/repo/bin/llm-ctl finds lib/ and backends/.
+_self=${BASH_SOURCE[0]}
+while [ -L "$_self" ]; do
+  _target=$(readlink "$_self")
+  case "$_target" in
+    /*) _self=$_target ;;
+    *)  _self=$(dirname "$_self")/$_target ;;
+  esac
+done
+LLMCTL_LIBEXEC=$(cd "$(dirname "$_self")/.." && pwd)
+
+for _lib in core config runtime backend commands; do
+  # shellcheck source=/dev/null
+  source "$LLMCTL_LIBEXEC/lib/$_lib.sh" || {
+    echo "llm-ctl: broken install — cannot load lib/$_lib.sh from $LLMCTL_LIBEXEC" >&2
+    exit 1
+  }
+done
+
+usage() {
+  cat <<EOF
+${C_BOLD}llm-ctl${C_RESET} — run one local model server at a time, from files you can read.
+
+usage: llm-ctl [options] <command> [args]
+
+commands:
+  ls                    every model you have defined, and what state it is in
+  start <model>         start a model and wait until it actually answers
+  stop [model]          stop what is running (all of it, or just one model)
+  restart [model]       restart what is running, or switch to another model
+  status                what is up: backend, uptime, image, whether it serves
+  logs [model] [args]   logs of a model; extra args go to the container runtime
+                        (-f, --tail 50, --since 10m)
+  config [model]        print the exact command start would run — a dry run
+  wait [model]          block until the server answers
+  url [model]           print the OpenAI base URL
+  env [model]           print shell exports for OpenAI-compatible clients
+
+  new <model>           scaffold a model definition
+  edit [model]          open a model definition in \$EDITOR
+  lint [model...]       check definitions for mistakes
+  backends              serving engines available here
+  doctor                check this machine can actually run a model
+  completion <shell>    completion script for bash, zsh or fish
+  help [conf]           this message, or the model definition reference
+
+options:
+  -y, --yes             do not ask before stopping a running model
+  -q, --quiet           only errors
+      --json            machine-readable output (ls, status)
+      --debug           print the commands being run
+      --no-color        no ANSI colour (also: NO_COLOR=1)
+      --home <dir>      use this config directory instead of $LLMCTL_HOME
+      --port <port>     override the port for this invocation
+  -v, --version         print version
+
+configuration:
+  $LLMCTL_HOME/config          global settings
+  $LLMCTL_HOME/models.d/       one .conf per model
+  $LLMCTL_HOME/backends/       your own serving engines
+
+  Every setting can also come from the environment: LLMCTL_PORT, LLMCTL_BIND,
+  LLMCTL_GPUS, LLMCTL_RUNTIME, LLMCTL_API_KEY, LLMCTL_READY_TIMEOUT,
+  LLMCTL_EXCLUSIVE, LLMCTL_HOME. The environment wins over the config file.
+
+adding a model:
+  llm-ctl new <name>, then lint it, then read \`llm-ctl config <name>\` before
+  starting anything. \`llm-ctl help conf\` lists every key; docs/adding-a-model.md
+  walks through it with the failure modes named.
+EOF
+}
+
+usage_conf() {
+  cat <<EOF
+${C_BOLD}model definitions${C_RESET} — $LLMCTL_HOME/models.d/<name>.conf
+
+One file per model. The filename minus .conf is the name you pass to start.
+Each file is shell, sourced by llm-ctl, so it takes arrays and comments — treat
+it the way you treat a Makefile, and do not source one you did not write.
+
+  ${C_BOLD}DESC${C_RESET}         one line, shown by \`llm-ctl ls\`
+  ${C_BOLD}BACKEND${C_RESET}      serving engine; \`llm-ctl backends\`     [default: $DEFAULT_BACKEND]
+  ${C_BOLD}IMAGE${C_RESET}        container image to serve it with       [required]
+  ${C_BOLD}DIR${C_RESET}          host path to the weights, or to a single .gguf
+  ${C_BOLD}HF_MODEL${C_RESET}     hub id instead of DIR; the engine downloads it
+  ${C_BOLD}MODEL_FILE${C_RESET}   file inside DIR to load (GGUF repos ship several)
+  ${C_BOLD}ARGS${C_RESET}         array of engine flags; appended last, so these win
+  ${C_BOLD}ENV${C_RESET}          array of KEY=value passed into the container
+  ${C_BOLD}MOUNTS${C_RESET}       array of host:container[:ro] for anything outside DIR
+  ${C_BOLD}MODEL_PORT${C_RESET}   port for this model                    [default: $PORT]
+  ${C_BOLD}SERVED_NAME${C_RESET}  name clients ask for                   [default: the model name]
+  ${C_BOLD}MODEL_GPUS${C_RESET}   GPU spec for this model, or none       [default: $GPUS]
+  ${C_BOLD}SHM_SIZE${C_RESET}     shared memory for the container
+  ${C_BOLD}HEALTH_PATH${C_RESET}  readiness path                         [default: per backend]
+  ${C_BOLD}TRUST_REMOTE_CODE${C_RESET}  1 to let the checkpoint run its own python
+  ${C_BOLD}CMD${C_RESET}          argv to run, for BACKEND=custom
+  ${C_BOLD}MODEL_READY_TIMEOUT${C_RESET}  seconds to wait for this model
+
+  BACKEND=external delegates to a launcher that owns its own containers:
+  ${C_BOLD}LAUNCHER${C_RESET} ${C_BOLD}STOPPER${C_RESET} ${C_BOLD}LOGGER${C_RESET} ${C_BOLD}CONTAINER_NAME${C_RESET} ${C_BOLD}NODES${C_RESET}
+
+example:
+
+  DESC="Llama 3.1 8B Instruct, AWQ"
+  BACKEND="vllm"
+  IMAGE="vllm/vllm-openai:latest"
+  DIR="\$LLM_HOME/models/llama-3.1-8b-awq"
+  ARGS=(--max-model-len 32768 --quantization awq)
+EOF
+}
+
+# ---- global options ---------------------------------------------------------
+LLMCTL_JSON=0; LLMCTL_YES=0; LLMCTL_QUIET=0; LLMCTL_DEBUG=0
+_home_override=""; _port_override=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -y|--yes)     LLMCTL_YES=1; shift ;;
+    -q|--quiet)   LLMCTL_QUIET=1; shift ;;
+    --json)       LLMCTL_JSON=1; shift ;;
+    --debug)      LLMCTL_DEBUG=1; shift ;;
+    --no-color|--no-colour) LLMCTL_COLOR=never; _llmctl_init_colour; shift ;;
+    --home)       _home_override=${2:?--home needs a directory}; shift 2 ;;
+    --port)       _port_override=${2:?--port needs a port}; shift 2 ;;
+    -v|--version) echo "llm-ctl $LLMCTL_VERSION"; exit 0 ;;
+    -h|--help)    set -- help; break ;;
+    --)           shift; break ;;
+    -*)           error "unknown option: $1"; echo >&2; exit 2 ;;
+    *)            break ;;
+  esac
+done
+
+[ -n "$_home_override" ] && LLMCTL_HOME=$_home_override
+llmctl_load_config
+[ -n "$_port_override" ] && { PORT=$_port_override; }
+rt_detect
+
+# ---- dispatch ---------------------------------------------------------------
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  ""|help)
+    if [ "${1:-}" = conf ] || [ "${1:-}" = config ]; then usage_conf; exit 0; fi
+    usage
+    if [ -z "$cmd" ]; then echo; cmd_ls; fi
+    ;;
+  ls|list|ps)   cmd_ls "$@" ;;
+  start|up)     cmd_start "$@" ;;
+  stop|down)    cmd_stop "$@" ;;
+  restart)      cmd_restart "$@" ;;
+  status)       cmd_status "$@" ;;
+  logs|log)     cmd_logs "$@" ;;
+  config|show|dry-run) cmd_config "$@" ;;
+  wait)         cmd_wait "$@" ;;
+  url)          cmd_url "$@" ;;
+  env)          cmd_env "$@" ;;
+  new|create)   cmd_new "$@" ;;
+  edit)         cmd_edit "$@" ;;
+  lint|check)   cmd_lint "$@" ;;
+  backends)     cmd_backends "$@" ;;
+  doctor)       cmd_doctor "$@" ;;
+  completion)   cmd_completion "$@" ;;
+  version)      echo "llm-ctl $LLMCTL_VERSION" ;;
+  *)
+    error "unknown command: $cmd"
+    echo "try: llm-ctl help" >&2
+    exit 2
+    ;;
+esac

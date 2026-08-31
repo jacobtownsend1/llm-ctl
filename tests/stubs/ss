@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake ss: a port is "in use" iff it is listed in STUB_PORTS_BUSY.
+set -uo pipefail
+want=""
+for a in "$@"; do case "$a" in sport*) want=${a##*:} ;; esac; done
+for p in ${STUB_PORTS_BUSY:-}; do
+  [ "$p" = "$want" ] && { echo "LISTEN 0 128 0.0.0.0:$p 0.0.0.0:*"; exit 0; }
+done
+exit 0
