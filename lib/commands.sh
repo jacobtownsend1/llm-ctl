@@ -166,7 +166,18 @@ unmanaged_port_note() {
 
 stop_model() {
   local name=$1 target=${2:-}
-  load_model "$name" || { error "$MODEL_ERR"; return 1; }
+  if ! load_model "$name"; then
+    # The definition is gone but its container is still up -- someone renamed
+    # or deleted the conf while the model ran. That is exactly when you most
+    # need to stop it, so stop what we can see rather than refusing.
+    if [ -n "$target" ]; then
+      warn "$name has no definition any more; stopping container $target"
+      rt_stop "$target"
+      return 0
+    fi
+    error "$MODEL_ERR"
+    return 1
+  fi
   [ -n "$target" ] || target=$(container_for "$name")
   if [ "$BACKEND" = external ]; then
     if [ -n "$STOPPER" ]; then

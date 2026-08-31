@@ -343,6 +343,18 @@ test_logs_rejects_an_unknown_model_by_name() {
   assert_contains "$out" "no such model: nosuchmodel"
 }
 
+# Deleting or renaming a conf while its model runs must not strand the
+# container: it is still labelled, so stop must still be able to reach it.
+test_stop_works_after_its_definition_is_deleted() {
+  fixture_demo; serving 8000
+  llm-ctl start demo >/dev/null
+  rm -f "$LLMCTL_HOME/models.d/demo.conf"
+  local out; out=$(llm-ctl stop)
+  assert_contains "$out" "no definition any more"
+  assert_contains "$(llm-ctl status)" "nothing running"
+  grep -q '^llm-ctl-demo	' "$STUB_STATE/running" && fail "container still running"
+}
+
 test_stop_with_nothing_running_is_not_an_error() {
   fixture_demo
   local out rc; out=$(llm-ctl stop); rc=$?
