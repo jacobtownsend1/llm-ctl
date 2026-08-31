@@ -305,6 +305,44 @@ EOF
   assert_contains "$(llm-ctl status)" "nothing running"
 }
 
+# "nothing running" alone is misleading when a model is plainly answering on
+# the port -- a container started by hand, or under an older label.
+test_status_says_when_something_unmanaged_holds_the_port() {
+  fixture_demo
+  export STUB_PORTS_BUSY=8000
+  serving 8000
+  local out; out=$(llm-ctl status)
+  assert_contains "$out" "nothing running"
+  assert_contains "$out" "does not manage is serving on port 8000"
+  assert_contains "$(llm-ctl ls)" "does not manage is serving on port 8000"
+}
+
+test_no_port_note_when_the_port_is_free() {
+  fixture_demo
+  assert_not_contains "$(llm-ctl status)" "does not manage"
+  assert_not_contains "$(llm-ctl ls)" "does not manage"
+}
+
+# `wait` on a server that is already up printed its progress prefix anyway,
+# running "loading" into the result on one line.
+test_wait_on_a_ready_server_prints_no_progress_noise() {
+  fixture_demo; serving 8000
+  llm-ctl start demo >/dev/null
+  local out; out=$(llm-ctl wait)
+  assert_not_contains "$out" "loading"
+  assert_contains "$out" "demo is ready"
+}
+
+# A bare word after `logs` is a model name; docker logs takes only flags.
+test_logs_rejects_an_unknown_model_by_name() {
+  fixture_demo; serving 8000
+  llm-ctl start demo >/dev/null
+  local out rc
+  out=$(llm-ctl logs nosuchmodel); rc=$?
+  assert_status "$rc" 1
+  assert_contains "$out" "no such model: nosuchmodel"
+}
+
 test_stop_with_nothing_running_is_not_an_error() {
   fixture_demo
   local out rc; out=$(llm-ctl stop); rc=$?

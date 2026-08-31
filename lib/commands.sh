@@ -128,23 +128,40 @@ build_run_argv() {
 # Poll until the server answers, the container dies, or we run out of patience.
 wait_ready() {
   local port=$1 health=$2 timeout=$3 container=${4:-}
-  local waited=0 step=${LLMCTL_POLL_INTERVAL:-3} dots=0
-  [ "${LLMCTL_QUIET:-0}" = 1 ] || printf '    loading'
+  local waited=0 step=${LLMCTL_POLL_INTERVAL:-3} started=0
   while [ "$waited" -lt "$timeout" ]; do
     if is_serving "$port" "$health"; then
-      [ "$dots" -gt 0 ] && printf '\n'
+      [ "$started" = 1 ] && printf '\n'
       READY_SECONDS=$waited
       return 0
     fi
+    # Only announce that we are waiting once we know we have to.
+    if [ "$started" = 0 ] && [ "${LLMCTL_QUIET:-0}" != 1 ]; then
+      printf '    loading'; started=1
+    fi
     if [ -n "$container" ] && ! rt_is_running "$container"; then
-      [ "$dots" -gt 0 ] && printf '\n'
+      [ "$started" = 1 ] && printf '\n'
       return 2
     fi
     sleep "$step"; waited=$((waited + step))
-    [ "${LLMCTL_QUIET:-0}" = 1 ] || { printf '.'; dots=$((dots+1)); }
+    [ "${LLMCTL_QUIET:-0}" = 1 ] || printf '.'
   done
-  [ "$dots" -gt 0 ] && printf '\n'
+  [ "$started" = 1 ] && printf '\n'
   return 1
+}
+
+# "nothing running" is a confusing thing to read while a model is plainly
+# answering on the port -- which happens whenever a container was started by
+# hand, or by a version of this tool that used a different label. Say what is
+# actually true instead of leaving the user to doubt the tool.
+unmanaged_port_note() {
+  local port=${1:-$PORT}
+  port_in_use "$port" || return 0
+  if is_serving "$port"; then
+    printf 'note:      something llm-ctl does not manage is serving on port %s\n' "$port"
+  else
+    printf 'note:      something llm-ctl does not manage holds port %s\n' "$port"
+  fi
 }
 
 stop_model() {
@@ -221,6 +238,10 @@ cmd_ls() {
 
   if [ "${LLMCTL_JSON:-0}" = 1 ]; then printf '[%s]\n' "$out"; return 0; fi
 
+  if [ -z "$running" ]; then
+    local note; note=$(unmanaged_port_note)
+    [ -n "$note" ] && { echo; printf '%s\n' "${note#note:      }"; }
+  fi
   if [ -n "$running" ]; then
     echo
     while IFS=$'\t' read -r name _; do
@@ -390,6 +411,7 @@ cmd_status() {
   if [ "$any" = 0 ]; then
     if [ "${LLMCTL_JSON:-0}" = 1 ]; then echo '[]'; return 0; fi
     echo "nothing running"
+    unmanaged_port_note
     local last
     last=$(rt ps -a --filter "label=llm-ctl.model" --format '{{.Names}}' 2>/dev/null | head -1)
     [ -n "$last" ] && echo "last:      $last ($(rt inspect -f '{{.State.Status}}, exit {{.State.ExitCode}}' "$last" 2>/dev/null))"
@@ -405,7 +427,10 @@ cmd_logs() {
   local name="" args=()
   # A leading bare word that names a model selects it; the rest goes to the
   # runtime, so `llm-ctl logs -f` and `llm-ctl logs mymodel -f` both work.
-  if [ $# -gt 0 ] && [[ "$1" != -* ]] && [ -f "$(model_conf_path "$1")" ]; then
+  if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+    # A bare word here is a model name -- `docker logs` takes only flags
+    # besides the container, which llm-ctl supplies itself.
+    [ -f "$(model_conf_path "$1")" ] || die "no such model: $1"
     name=$1; shift
   fi
   args=("$@")
